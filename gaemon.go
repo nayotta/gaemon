@@ -15,8 +15,6 @@ type Service interface {
 }
 
 type Gaemon struct {
-	ctx             context.Context
-	cancel          context.CancelFunc
 	restartInterval time.Duration
 	errorCallback   func(error)
 	services        sync.Map
@@ -26,8 +24,7 @@ type Option func(g *Gaemon)
 
 func WithService(srv Service) Option {
 	return func(g *Gaemon) {
-		ctx := context.WithValue(g.ctx, struct{}{}, nil)
-		g.services.Store(ctx, srv)
+		g.services.Store(srv, srv)
 	}
 }
 
@@ -43,12 +40,10 @@ func WithErrorCallback(cb func(error)) Option {
 	}
 }
 
-func New(ctx context.Context, opts ...Option) *Gaemon {
+func New(opts ...Option) *Gaemon {
 	g := &Gaemon{
 		restartInterval: time.Second,
 	}
-
-	g.ctx, g.cancel = context.WithCancel(ctx)
 
 	for _, opt := range opts {
 		opt(g)
@@ -77,10 +72,12 @@ func (g *Gaemon) reload() {
 	})
 }
 
-func (g *Gaemon) Run() {
+func (g *Gaemon) Run(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var wg sync.WaitGroup
 	g.services.Range(func(key, value any) bool {
-		ctx := key.(context.Context)
 		srv := value.(Service)
 
 		wg.Add(1)
@@ -91,9 +88,14 @@ func (g *Gaemon) Run() {
 			defer ticker.Stop()
 
 			for {
-				err := srv.Serve(ctx)
-				if g.errorCallback != nil {
-					g.errorCallback(err)
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					err := srv.Serve(ctx)
+					if g.errorCallback != nil {
+						g.errorCallback(err)
+					}
 				}
 
 				select {
@@ -116,7 +118,7 @@ func (g *Gaemon) Run() {
 			switch c {
 			case syscall.SIGINT, syscall.SIGTERM:
 				if firstSigTerm {
-					g.cancel()
+					cancel()
 				} else {
 					// force exit on repeated terminate signals
 					os.Exit(1)
